@@ -53,11 +53,12 @@ import streamlit.components.v1 as components
 
 # ====== 手動マーク用カスタムコンポーネント（タップ=カウント / 長押し=補足） ======
 _COMPONENT_DIR = Path(__file__).resolve().parent.parent / "components" / "dance_marker"
+_DANCE_MARKER_AVAILABLE = False
 try:
     _dance_marker = components.declare_component("dance_marker", path=str(_COMPONENT_DIR))
-except RuntimeError:
-    from streamlit.components.v1.components import CustomComponent
-    _dance_marker = CustomComponent("dance_marker", path=str(_COMPONENT_DIR))
+    _DANCE_MARKER_AVAILABLE = True
+except Exception:
+    _dance_marker = None
 
 
 def dance_marker(
@@ -74,6 +75,9 @@ def dance_marker(
       {"label", "mode", "beats":[秒...], "supps":[[a,b]...],
        "video_b64":str|None, "video_mime":str|None, "ts":int}
     """
+    if not _DANCE_MARKER_AVAILABLE:
+        st.info("手動マーク機能はクラウド版では利用できません。ローカル環境またはサーバー版をご利用ください。")
+        return None
     return _dance_marker(
         label=label,
         video_data_url=video_data_url,
