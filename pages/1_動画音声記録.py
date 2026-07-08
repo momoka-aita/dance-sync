@@ -53,7 +53,11 @@ import streamlit.components.v1 as components
 
 # ====== 手動マーク用カスタムコンポーネント（タップ=カウント / 長押し=補足） ======
 _COMPONENT_DIR = Path(__file__).resolve().parent.parent / "components" / "dance_marker"
-_dance_marker = components.declare_component("dance_marker", path=str(_COMPONENT_DIR))
+try:
+    _dance_marker = components.declare_component("dance_marker", path=str(_COMPONENT_DIR))
+except RuntimeError:
+    from streamlit.components.v1.components import CustomComponent
+    _dance_marker = CustomComponent("dance_marker", path=str(_COMPONENT_DIR))
 
 
 def dance_marker(
