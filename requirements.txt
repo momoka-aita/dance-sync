@@ -1,0 +1,9 @@
+streamlit>=1.50.0
+moviepy>=2.0.0.dev2
+openai-whisper>=20250625
+faster-whisper>=1.2.0
+numpy
+scipy
+pillow
+soundfile
+imageio-ffmpeg

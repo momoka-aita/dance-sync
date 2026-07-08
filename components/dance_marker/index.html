@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif;
+    color: #e8e8e8;
+  }
+  .wrap { padding: 8px; }
+  .modebar { display: flex; gap: 8px; margin-bottom: 8px; }
+  .modebar button {
+    flex: 1; padding: 8px; border-radius: 8px; border: 1px solid #555;
+    background: #2b2b2b; color: #ddd; font-size: 14px; cursor: pointer;
+  }
+  .modebar button.active { background: #2563eb; border-color: #2563eb; color: #fff; }
+  .videoBox { position: relative; width: 100%; background: #000; border-radius: 10px; overflow: hidden; }
+  video { width: 100%; max-height: 360px; display: block; background: #000; }
+  .controls { display: flex; gap: 10px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+  .bigbtn {
+    flex: 1; min-width: 120px; padding: 18px 10px; border-radius: 12px; border: none;
+    font-size: 17px; font-weight: 700; cursor: pointer; user-select: none;
+    -webkit-user-select: none; touch-action: none;
+  }
+  .countbtn { background: #2563eb; color: #fff; }
+  .countbtn:disabled { background: #444; color: #888; cursor: not-allowed; }
+  .countbtn.holding { background: #ea8a00; }
+  .recbtn { background: #dc2626; color: #fff; }
+  .recbtn.recording { background: #6b7280; }
+  .small { padding: 8px 12px; border-radius: 8px; border: 1px solid #555; background: #2b2b2b; color: #ddd; cursor: pointer; font-size: 13px; }
+  .savebtn { background: #16a34a; color:#fff; border:none; padding: 12px; border-radius: 10px; font-size: 15px; font-weight: 700; cursor: pointer; width: 100%; margin-top: 10px; }
+  .status { font-size: 13px; color: #9ca3af; margin: 6px 0; min-height: 18px; }
+  .lists { display: flex; gap: 12px; margin-top: 10px; }
+  .listcol { flex: 1; background: #1f1f1f; border-radius: 8px; padding: 8px; font-size: 13px; }
+  .listcol h4 { margin: 0 0 6px; font-size: 13px; color: #cbd5e1; }
+  .chip { display: inline-block; background: #333; border-radius: 6px; padding: 2px 6px; margin: 2px; font-variant-numeric: tabular-nums; }
+  .chip.supp { background: #7c3f00; }
+  .row { display:flex; gap:8px; margin-top: 8px; }
+  .hint { font-size: 12px; color: #9ca3af; margin-top: 4px; }
+  .timer { font-variant-numeric: tabular-nums; font-weight: 700; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="modebar">
+    <button id="modeUpload">📁 アップロード動画をマーク</button>
+    <button id="modeRecord">📷 カメラで撮影してマーク</button>
+  </div>
+
+  <div class="videoBox">
+    <video id="vid" playsinline></video>
+  </div>
+
+  <div class="status" id="status"></div>
+
+  <div class="controls">
+    <button class="bigbtn recbtn" id="recBtn" style="display:none;">● 録画開始</button>
+    <button class="bigbtn countbtn" id="countBtn" disabled>カウント<br><span style="font-size:12px;font-weight:400;">タップ=拍 / 長押し=補足</span></button>
+  </div>
+
+  <div class="row">
+    <button class="small" id="undoBtn">↩︎ 元に戻す</button>
+    <button class="small" id="clearBtn">🗑 全消去</button>
+    <span class="status" style="flex:1;text-align:right;" id="timeInfo"></span>
+  </div>
+
+  <div class="lists">
+    <div class="listcol">
+      <h4>カウント (<span id="beatCount">0</span>/8)</h4>
+      <div id="beatList"></div>
+    </div>
+    <div class="listcol">
+      <h4>補足 (<span id="suppCount">0</span>)</h4>
+      <div id="suppList"></div>
+    </div>
+  </div>
+
+  <button class="savebtn" id="saveBtn">✅ この内容を保存して同期に使う</button>
+  <div class="hint" id="saveHint"></div>
+</div>
+
+<script>
+// ====== Streamlit component protocol (static, no build) ======
+function post(type, extra) {
+  const msg = Object.assign({ isStreamlitMessage: true, type: type }, extra || {});
+  window.parent.postMessage(msg, "*");
+}
+function setFrameHeight() {
+  post("streamlit:setFrameHeight", { height: document.body.scrollHeight });
+}
+function setValue(value) {
+  post("streamlit:setComponentValue", { dataType: "json", value: value });
+}
+
+// ====== State ======
+let MODE = "upload";        // "upload" | "record"
+let MAX_BEATS = 8;
+let LABEL = "";
+let beats = [];             // seconds (numbers)
+let supps = [];             // [start, end]
+let actionOrder = [];       // "beat" | "supp" for undo
+let recStart = 0;           // ms epoch when recording started
+let recording = false;
+let mediaRecorder = null;
+let recordedChunks = [];
+let recordedBlob = null;
+let recordedMime = "";
+let liveStream = null;
+
+const vid = document.getElementById("vid");
+const statusEl = document.getElementById("status");
+const timeInfo = document.getElementById("timeInfo");
+const countBtn = document.getElementById("countBtn");
+const recBtn = document.getElementById("recBtn");
+const beatListEl = document.getElementById("beatList");
+const suppListEl = document.getElementById("suppList");
+const beatCountEl = document.getElementById("beatCount");
+const suppCountEl = document.getElementById("suppCount");
+const saveHint = document.getElementById("saveHint");
+
+// ====== Time source ======
+function currentMediaTime() {
+  if (MODE === "record") {
+    if (recording) return (Date.now() - recStart) / 1000;
+    // recorded playback
+    return vid.currentTime || 0;
+  }
+  return vid.currentTime || 0;   // upload playback
+}
+
+// ====== Rendering ======
+function fmt(t) { return Number(t).toFixed(2); }
+function render() {
+  beatCountEl.textContent = beats.length;
+  suppCountEl.textContent = supps.length;
+  beatListEl.innerHTML = beats.map((t,i) =>
+    `<span class="chip">${i+1}: ${fmt(t)}s</span>`).join("");
+  suppListEl.innerHTML = supps.map((s,i) =>
+    `<span class="chip supp">${fmt(s[0])}–${fmt(s[1])}s</span>`).join("");
+  countBtn.disabled = !canMark();
+  setFrameHeight();
+}
+function canMark() {
+  if (MODE === "upload") return !!vid.src && vid.readyState >= 1;
+  return recording || (recordedBlob != null);
+}
+
+// ====== Beat / Supplement marking ======
+let holdTimer = null, holdStartMediaTime = 0, holdStartMs = 0, isHold = false;
+const HOLD_THRESHOLD_MS = 250;   // これ以上の長押しで補足
+
+function pressStart(e) {
+  e.preventDefault();
+  if (!canMark()) return;
+  holdStartMediaTime = currentMediaTime();
+  holdStartMs = Date.now();
+  isHold = false;
+  holdTimer = setTimeout(() => {
+    isHold = true;
+    countBtn.classList.add("holding");
+    countBtn.querySelector("br").nextSibling; // noop
+  }, HOLD_THRESHOLD_MS);
+}
+function pressEnd(e) {
+  e.preventDefault();
+  if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+  if (!canMark()) return;
+  const held = Date.now() - holdStartMs;
+  countBtn.classList.remove("holding");
+  if (held >= HOLD_THRESHOLD_MS) {
+    // 補足区間
+    const a = holdStartMediaTime;
+    const b = currentMediaTime();
+    if (b - a > 0.05) {
+      supps.push([Math.min(a,b), Math.max(a,b)]);
+      actionOrder.push("supp");
+      flash("#ea8a00");
+    }
+  } else {
+    // カウント拍
+    if (beats.length < MAX_BEATS) {
+      beats.push(holdStartMediaTime);
+      beats.sort((x,y)=>x-y);
+      actionOrder.push("beat");
+      flash("#2563eb");
+    } else {
+      status(`カウントは最大 ${MAX_BEATS} 個までです`);
+    }
+  }
+  render();
+}
+function flash(color) {
+  const orig = countBtn.style.background;
+  countBtn.style.background = "#facc15";
+  setTimeout(()=>{ countBtn.style.background = ""; }, 120);
+  if (navigator.vibrate) navigator.vibrate(20);
+}
+
+countBtn.addEventListener("pointerdown", pressStart);
+countBtn.addEventListener("pointerup", pressEnd);
+countBtn.addEventListener("pointerleave", (e)=>{ if (holdTimer){ pressEnd(e);} });
+
+document.getElementById("undoBtn").addEventListener("click", () => {
+  const last = actionOrder.pop();
+  if (last === "beat") beats.pop();
+  else if (last === "supp") supps.pop();
+  render();
+});
+document.getElementById("clearBtn").addEventListener("click", () => {
+  beats = []; supps = []; actionOrder = []; render();
+});
+
+// ====== Time info ticker ======
+setInterval(() => {
+  if (!canMark()) { timeInfo.textContent = ""; return; }
+  const t = currentMediaTime();
+  timeInfo.innerHTML = `現在位置: <span class="timer">${fmt(t)}s</span>`;
+}, 100);
+
+// ====== Mode switching ======
+function status(msg) { statusEl.textContent = msg; }
+function setMode(m) {
+  MODE = m;
+  document.getElementById("modeUpload").classList.toggle("active", m==="upload");
+  document.getElementById("modeRecord").classList.toggle("active", m==="record");
+  stopLiveStream();
+  recording = false; recordedBlob = null; recordedChunks = [];
+  vid.muted = false; vid.removeAttribute("autoplay");
+  if (m === "upload") {
+    recBtn.style.display = "none";
+    vid.controls = true;
+    if (UPLOAD_URL) { vid.src = UPLOAD_URL; status("動画を再生しながらタップ/長押しでマークしてください"); }
+    else { vid.removeAttribute("src"); vid.load(); status("Python側でアップロードされた動画がありません"); }
+  } else {
+    recBtn.style.display = "";
+    recBtn.classList.remove("recording");
+    recBtn.textContent = "● 録画開始";
+    vid.controls = false;
+    vid.removeAttribute("src"); vid.load();
+    startPreview();
+    status("カメラプレビュー中。録画開始を押して撮影しながらマークしてください");
+  }
+  render();
+}
+document.getElementById("modeUpload").addEventListener("click", ()=>setMode("upload"));
+document.getElementById("modeRecord").addEventListener("click", ()=>setMode("record"));
+
+// ====== Camera / recording ======
+async function startPreview() {
+  try {
+    liveStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: true });
+    vid.srcObject = liveStream;
+    vid.muted = true;
+    await vid.play().catch(()=>{});
+  } catch (err) {
+    status("カメラにアクセスできません: " + err.message + "（httpsまたはlocalhostが必要）");
+  }
+}
+function stopLiveStream() {
+  if (liveStream) { liveStream.getTracks().forEach(t=>t.stop()); liveStream = null; }
+  if (vid.srcObject) { vid.srcObject = null; }
+}
+recBtn.addEventListener("click", async () => {
+  if (!recording) {
+    if (!liveStream) { await startPreview(); if (!liveStream) return; }
+    recordedChunks = [];
+    const mimeCandidates = ["video/mp4", "video/webm;codecs=vp9,opus", "video/webm"];
+    recordedMime = mimeCandidates.find(m => MediaRecorder.isTypeSupported(m)) || "video/webm";
+    mediaRecorder = new MediaRecorder(liveStream, { mimeType: recordedMime });
+    mediaRecorder.ondataavailable = (e)=>{ if (e.data.size>0) recordedChunks.push(e.data); };
+    mediaRecorder.onstop = onRecordingStop;
+    beats = []; supps = []; actionOrder = [];
+    mediaRecorder.start();
+    recStart = Date.now();
+    recording = true;
+    recBtn.classList.add("recording");
+    recBtn.textContent = "■ 停止";
+    status("録画中… タップ=拍 / 長押し=補足");
+    render();
+  } else {
+    mediaRecorder.stop();
+    recording = false;
+    recBtn.classList.add("recording");
+    recBtn.textContent = "● 録画開始";
+    status("録画停止。プレビュー再生できます。保存すると同期に使われます。");
+  }
+});
+function onRecordingStop() {
+  recordedBlob = new Blob(recordedChunks, { type: recordedMime });
+  stopLiveStream();
+  const url = URL.createObjectURL(recordedBlob);
+  vid.srcObject = null;
+  vid.src = url;
+  vid.muted = false;
+  vid.controls = true;
+  recBtn.classList.remove("recording");
+  render();
+}
+
+// ====== Save (send value to Python) ======
+document.getElementById("saveBtn").addEventListener("click", async () => {
+  const payload = { label: LABEL, mode: MODE, beats: beats.slice(), supps: supps.slice(), ts: Date.now() };
+  if (MODE === "record" && recordedBlob) {
+    saveHint.textContent = "録画データを送信中…";
+    const b64 = await blobToBase64(recordedBlob);
+    payload.video_b64 = b64;
+    payload.video_mime = recordedMime;
+  }
+  setValue(payload);
+  saveHint.textContent = `保存しました（カウント ${beats.length} / 補足 ${supps.length}）`;
+});
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onloadend = () => resolve(r.result.split(",")[1]);  // strip data: prefix
+    r.onerror = reject;
+    r.readAsDataURL(blob);
+  });
+}
+
+// ====== Streamlit render handshake ======
+let UPLOAD_URL = null;
+let rendered = false;
+window.addEventListener("message", (event) => {
+  if (!event.data || event.data.type !== "streamlit:render") return;
+  const args = event.data.args || {};
+  MAX_BEATS = args.max_beats || 8;
+  LABEL = args.label || "";
+  const newUrl = args.video_data_url || null;
+  const initMode = args.mode || (newUrl ? "upload" : "record");
+  if (!rendered) {
+    rendered = true;
+    UPLOAD_URL = newUrl;
+    setMode(initMode);
+  } else if (newUrl !== UPLOAD_URL) {
+    UPLOAD_URL = newUrl;
+    if (MODE === "upload") setMode("upload");
+  }
+  render();
+});
+vid.addEventListener("loadedmetadata", render);
+vid.addEventListener("play", render);
+
+post("streamlit:componentReady", { apiVersion: 1 });
+setFrameHeight();
+window.addEventListener("resize", setFrameHeight);
+</script>
+</body>
+</html>
